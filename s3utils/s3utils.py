@@ -1,6 +1,12 @@
+# -*- coding: utf-8 -*-
+""" s3utils s3utils """
+
 import os
 import re
 import boto
+import cStringIO
+import urllib2
+
 # from boto.s3.connection import S3Connection
 from boto.s3.key import Key
 from boto import connect_cloudfront
@@ -223,7 +229,18 @@ class S3utils(object):
             self.k.set_acl(acl)  # setting the file permissions
             self.k.close()  # not sure if it is needed. Somewhere I read it is recommended.
 
-            self.printv("%s %s to %s" % (action_word, local_file, target_file))
+            try:
+                self.printv(
+                    "%s %s to %s" % (action_word, local_file, target_file))
+            except UnicodeDecodeError:
+                self.printv(
+                    "%s %s to %s" % (
+                        action_word,
+                        local_file.decode('utf-8', 'ignore'),
+                        target_file
+                    )
+                )
+
             # if it is supposed to delete the local file after uploading
             if del_after_upload and source == "filename":
                 try:
@@ -236,6 +253,205 @@ class S3utils(object):
         except:
             logger.error("Error in writing to %s", target_file, exc_info=True)
             return False
+
+    def cp_from_url(
+        self, source_url, target_path, acl='public-read', overwrite=True,
+        invalidate=False
+    ):
+        """
+        Uploads a file from an specific url to s3.
+
+        Parameters
+        ----------
+
+        source_url : string
+            Url of the file to be uploaded.
+
+        target_path : string
+            Target path on S3 bucket.
+
+        acl : string, optional
+            File permissions on S3. Default is public-read
+
+            options:
+                - private: Owner gets FULL_CONTROL. No one else has any access
+                  rights.
+                - public-read: Owners gets FULL_CONTROL and the anonymous
+                  principal is granted READ access.
+                - public-read-write: Owner gets FULL_CONTROL and the anonymous
+                  principal is granted READ and WRITE access.
+                - authenticated-read: Owner gets FULL_CONTROL and any principal
+                  authenticated as a registered Amazon S3 user is granted READ
+                  access.
+
+        overwrite : boolean, optional
+            overwrites files on S3 if set to True. Default is True
+
+        invalidate : boolean, optional
+            invalidates the CDN (a.k.a Distribution) cache if the file already
+            exists on S3.
+            default = False
+            Note that invalidation might take up to 15 minutes to take place.
+            It is easier and faster to use cache buster
+            to grab lastest version of your file on CDN than invalidation.
+
+        **Returns**
+
+        Nothing on success but it will return what went wrong if something
+        fails.
+
+        Example
+        --------
+            >>> s3utils.cp_from_url(
+                  "http://www.mysite/static/images/pic1.jpg", "/images/")
+                copying <StringIO.StringIO instance at 0x7f36238872d8> to
+                images/pic1.jpg
+        """
+        result = None
+
+        if overwrite:
+            list_of_files = []
+        else:
+            list_of_files = self.ls(
+                folder=target_path, begin_from_file="", num=-1,
+                get_grants=False, all_grant_data=False
+            )
+
+        try:
+            key = source_url.split('/')[-1]
+        except IndexError:
+            result = {'impossible_to_extract_file_name': source_url}
+            logger.error(
+                "it was not possible to extract the file name from: %s "
+                .format(source_url)
+            )
+            return result
+
+        target_file = re.sub(r'^/', '', os.path.join(target_path, key))
+
+        try:
+            file_object = urllib2.urlopen(source_url)
+        except urllib2.HTTPError:
+            result = {'url_not_found': source_url}
+            logger.error(
+                "file url not found".format(source_url)
+            )
+            return result
+
+        remote_file = cStringIO.StringIO(file_object.read())
+
+        if overwrite or (not overwrite and target_file not in list_of_files):
+            success = self.__put_key(
+                remote_file,
+                target_file=target_file,
+                acl=acl,
+                overwrite=overwrite,
+                source='fileobj'
+            )
+            if not success:
+                result = {'failed_to_copy_file': target_file}
+        else:
+            result = {'file_already_exits': target_file}
+            logger.error("%s already exist. Not overwriting.", target_file)
+
+        if overwrite and target_file in list_of_files and invalidate:
+            self.invalidate(target_file)
+
+        return result
+
+    def cp_from_string(
+        self, stringio_obj, name, target_path, acl='public-read',
+        overwrite=True, invalidate=False
+    ):
+        """
+        Uploads a file loaded into an StringIO object to s3.
+
+        Parameters
+        ----------
+
+        stringio_ob : StringIO object
+            StringIO object containing the file.
+
+        name : string
+            name to be used when saving the StringIO object
+
+        target_path : string
+            Target path on S3 bucket.
+
+        acl : string, optional
+            File permissions on S3. Default is public-read
+
+            options:
+                - private: Owner gets FULL_CONTROL. No one else has any access
+                  rights.
+                - public-read: Owners gets FULL_CONTROL and the anonymous
+                  principal is granted READ access.
+                - public-read-write: Owner gets FULL_CONTROL and the anonymous
+                  principal is granted READ and WRITE access.
+                - authenticated-read: Owner gets FULL_CONTROL and any principal
+                  authenticated as a registered Amazon S3 user is granted READ
+                  access
+
+        overwrite : boolean, optional
+            overwrites files on S3 if set to True. Default is True
+
+        invalidate : boolean, optional
+            invalidates the CDN (a.k.a Distribution) cache if the file already
+            exists on S3
+            default = False
+            Note that invalidation might take up to 15 minutes to take place.
+            It is easier and faster to use cache buster
+            to grab lastest version of your file on CDN than invalidation.
+
+        **Returns**
+
+        Nothing on success but it will return what went wrong if something
+        fails.
+
+        Example
+        --------
+            >>> import cStringIO
+            >>> from PIL import Image
+
+            >>> original_img = Image.open(..)
+            >>> im = original_img.crop(left, upper, right, and lower)
+            >>> im = im.resize(with, height, Image.ANTIALIAS)
+            >>> img_string = cStringIO.StringIO()
+            >>> im.save(img_string, "JPEG")
+            >>> go_s3 = S3utils()
+            >>> s3utils.cp_from_string(
+                  img_string, 'my_crop.jpg', '/img/crops/')
+        """
+        result = None
+
+        if overwrite:
+            list_of_files = []
+        else:
+            list_of_files = self.ls(
+                folder=target_path, begin_from_file="", num=-1,
+                get_grants=False, all_grant_data=False
+            )
+
+        target_file = re.sub(r'^/', '', os.path.join(target_path, name))
+
+        if overwrite or (not overwrite and target_file not in list_of_files):
+            success = self.__put_key(
+                stringio_obj.getvalue(),
+                target_file=target_file,
+                acl=acl,
+                overwrite=overwrite,
+                source='string'
+            )
+            if not success:
+                result = {'failed_to_copy_file': target_file}
+        else:
+            result = {'file_already_exits': target_file}
+            logger.error("%s already exist. Not overwriting.", target_file)
+
+        if overwrite and target_file in list_of_files and invalidate:
+            self.invalidate(target_file)
+
+        return result
 
     def cp(self, local_path, target_path, acl='public-read',
            del_after_upload=False, overwrite=True, invalidate=False):
