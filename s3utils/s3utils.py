@@ -255,8 +255,8 @@ class S3utils(object):
             return False
 
     def cp_from_url(
-        self, source_url, target_path, acl='public-read', overwrite=True,
-        invalidate=False
+        self, source_url, target_path, filename=None, acl='public-read',
+        overwrite=True, invalidate=False
     ):
         """
         Uploads a file from an specific url to s3.
@@ -269,6 +269,8 @@ class S3utils(object):
 
         target_path : string
             Target path on S3 bucket.
+
+        filename : custom file name
 
         acl : string, optional
             File permissions on S3. Default is public-read
@@ -317,15 +319,18 @@ class S3utils(object):
                 get_grants=False, all_grant_data=False
             )
 
-        try:
-            key = source_url.split('/')[-1]
-        except IndexError:
-            result = {'impossible_to_extract_file_name': source_url}
-            logger.error(
-                "it was not possible to extract the file name from: %s "
-                .format(source_url)
-            )
-            return result
+        if filename:
+            key = filename
+        else:
+            try:
+                key = source_url.split('/')[-1]
+            except IndexError:
+                result = {'impossible_to_extract_file_name': source_url}
+                logger.error(
+                    "it was not possible to extract the file name from: %s "
+                    .format(source_url)
+                )
+                return result
 
         target_file = re.sub(r'^/', '', os.path.join(target_path, key))
 
